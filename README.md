@@ -42,12 +42,3 @@ Task board for data engineers: assignments, deadlines, and progress tracking.
 Publicly available cherry blossom datasets used as primary sources.
 
 
-## Features ✨
-
-* **Code Search:** Quickly find code across your repositories.
-* **Pull Requests:** Collaborate efficiently on code changes.
-* **Issues:** Track bugs, feature requests, and other tasks.
-* **Projects:** Organize and prioritize work.
-* **Wikis:** Create and share documentation.
-
-
