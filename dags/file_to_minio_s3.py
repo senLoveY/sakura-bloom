@@ -14,7 +14,7 @@ def upload_local_file_to_minio():
         filename='/opt/airflow/dags/example.csv',
         dest_bucket='miniobucket',
         dest_key='example.csv',
-        aws_conn_id='minio_conn',  # Connection to MinIO
+        aws_conn_id='minio_conn',
     )
 
 
