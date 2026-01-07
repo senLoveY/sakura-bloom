@@ -4,6 +4,7 @@ import json
 import time
 import requests
 import csv
+import logging
 from io import StringIO
 from datetime import datetime
 from airflow.decorators import dag, task
@@ -12,6 +13,8 @@ from pendulum import datetime as pen_datetime
 
 sys.path.append('/opt/airflow')
 from config.paths_config import MinioConfig
+
+logger = logging.getLogger(__name__)
 
 MINIO_CONN_ID = "minio_conn"
 
@@ -31,12 +34,11 @@ def load_geo_data():
         read CSV from MinIO and return list of cities
         """
         hook = S3Hook(aws_conn_id=MINIO_CONN_ID)
-
         bucket = MinioConfig.BUCKET_RAW_DATA
         key = MinioConfig.RAW_BLOOM_DATA_FILE
 
         if not hook.check_for_key(key=key, bucket_name=bucket):
-            print(f"file {key} not found  in {bucket}.")
+            logger.warning(f"File {key} not found in {bucket}. Returning default list.")
             return ["Tokyo", "Kyoto"]
 
         file_content = hook.read_key(key=key, bucket_name=bucket)
@@ -44,14 +46,14 @@ def load_geo_data():
         cities = set()
         csv_reader = csv.DictReader(StringIO(file_content))
 
-        print(f"CSV: {csv_reader.fieldnames}")
+        logger.info(f"CSV Fieldnames: {csv_reader.fieldnames}")
 
         for row in csv_reader:
             site_name = row.get('Site Name')
             if site_name:
                 cities.add(site_name.strip())
 
-        print(f"found {len(cities)} unique ones cities")
+        logger.info(f"Found {len(cities)} unique cities")
         return list(cities)
 
     @task(max_active_tis_per_dag=1)
@@ -72,7 +74,7 @@ def load_geo_data():
         }
 
         try:
-            print(f"Requesting geodata for: {city_name}")
+            logger.info(f"Requesting geodata for: {city_name}")
             response = requests.get(url, params=params, headers=headers)
             response.raise_for_status()
             data = response.json()
@@ -80,11 +82,10 @@ def load_geo_data():
             time.sleep(1.1)
 
             if not data:
-                print(f"WARN: Data for '{city_name}' was not found in Nominatim.")
+                logger.warning(f"Data for '{city_name}' was not found in Nominatim.")
                 return
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
             safe_city_name = "".join([c for c in city_name if c.isalnum() or c in (' ', '-', '_')]).strip()
 
             dest_key = MinioConfig.GEO_NOMINATIM_PATH.format(
@@ -100,10 +101,10 @@ def load_geo_data():
                 bucket_name=MinioConfig.BUCKET_GEO_DATA,
                 replace=True
             )
-            print(f"SUCCESS: Saved in {MinioConfig.BUCKET_GEO_DATA}/{dest_key}")
+            logger.info(f"SUCCESS: Saved in {MinioConfig.BUCKET_GEO_DATA}/{dest_key}")
 
         except Exception as e:
-            print(f"ERROR: Processing error {city_name}: {e}")
+            logger.error(f"Processing error for {city_name}: {e}")
             raise e
 
     cities_list = get_cities_list()
