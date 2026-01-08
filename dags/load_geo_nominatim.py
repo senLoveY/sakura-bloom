@@ -70,7 +70,8 @@ def load_geo_data():
             "limit": 1
         }
         headers = {
-            "User-Agent": "SakuraBloomProject/1.0 (internal research)"
+            "User-Agent": "SakuraBloomProject/1.0 (internal research)",
+            "Accept-Language": "en-US,en;q=0.9"
         }
 
         try:
