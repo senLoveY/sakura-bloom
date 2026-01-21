@@ -15,7 +15,7 @@ MINIO_CONN_ID = "minio_conn"
 SNOWFLAKE_CONN_ID = "snowflake_conn"
 
 @dag(
-    dag_id="minio_to_snowflake_load",
+    dag_id="geo_minio_to_snowflake_load",
     start_date=pen_datetime(2025, 1, 1),
     schedule=None,
     catchup=False,
