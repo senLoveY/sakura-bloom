@@ -20,3 +20,4 @@ Thumbs.db
 # Airflow config
 airflow.cfg
 logs
+airflow-venv/
