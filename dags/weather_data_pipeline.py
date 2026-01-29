@@ -1,12 +1,11 @@
 import sys
-import os
 import json
 import time
 import requests
 import csv
 import logging
 from io import StringIO
-from datetime import datetime
+from datetime import date
 from airflow.decorators import dag, task
 from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.hooks.base import BaseHook
@@ -20,136 +19,96 @@ logger = logging.getLogger(__name__)
 MINIO_CONN_ID = "minio_conn"
 VISUALCROSSING_CONN_ID = "visualcrossing_conn"
 
-
 @dag(
     dag_id="load_weather_data_visualcrossing",
     start_date=pen_datetime(2025, 1, 1),
     schedule=None,
     catchup=False,
-    tags=["ingestion", "visualcrossing", "weather", "minio"],
-    description="Download weather data from VisualCrossing API for cities",
+    tags=["ingestion", "historical", "weather"],
 )
 def load_weather_data():
-    
+
     @task
     def get_cities_list():
-
         hook = S3Hook(aws_conn_id=MINIO_CONN_ID)
         bucket = MinioConfig.BUCKET_RAW_DATA
         key = MinioConfig.RAW_BLOOM_DATA_FILE
 
         if not hook.check_for_key(key=key, bucket_name=bucket):
-            logger.warning(f"File {key} not found in {bucket}. Returning default list.")
+            logger.warning(f"File {key} not found. Using defaults.")
             return ["Tokyo", "Kyoto"]
 
         file_content = hook.read_key(key=key, bucket_name=bucket)
-
         cities = set()
         csv_reader = csv.DictReader(StringIO(file_content))
-
-        logger.info(f"CSV Fieldnames: {csv_reader.fieldnames}")
-
         for row in csv_reader:
             site_name = row.get('Site Name')
             if site_name:
                 cities.add(site_name.strip())
 
-        logger.info(f"Found {len(cities)} unique cities")
+        logger.info(f"Found {len(cities)} cities")
         return list(cities)
 
     @task(max_active_tis_per_dag=1)
-    def fetch_and_upload_weather(city_name: str):
+    def fetch_city_history(city_name: str):
 
-        try:
-            conn = BaseHook.get_connection(VISUALCROSSING_CONN_ID)
-            api_key = conn.password  # API key stored in password field
-            logger.info(f"Successfully loaded API key from connection '{VISUALCROSSING_CONN_ID}'")
-        except Exception as e:
-            logger.error(f"Failed to get VisualCrossing connection: {e}")
-            raise ValueError(f"Connection '{VISUALCROSSING_CONN_ID}' not found or invalid")
-        
-        if not api_key:
-            logger.error("API key is empty in the connection!")
-            raise ValueError("API key is required but not found in connection password field")
-        
+        conn = BaseHook.get_connection(VISUALCROSSING_CONN_ID)
+        api_key = conn.password
         hook = S3Hook(aws_conn_id=MINIO_CONN_ID)
 
+        start_year = 2000
+        current_year = date.today().year
 
-        location = f"{city_name},{VisualCrossingConfig.COUNTRY}"
-        date_range = f"{VisualCrossingConfig.START_DATE}/{VisualCrossingConfig.END_DATE}"
-        
-        url = f"{VisualCrossingConfig.BASE_URL}/{location}/{date_range}"
-        
-        params = {
-            "unitGroup": VisualCrossingConfig.UNIT_GROUP,
-            "contentType": VisualCrossingConfig.CONTENT_TYPE,
-            "include": VisualCrossingConfig.INCLUDE,
-            "key": api_key
-        }
-        
+        safe_city = "".join([c for c in city_name if c.isalnum() or c in (' ', '-', '_')]).strip()
 
-        if hasattr(VisualCrossingConfig, 'ELEMENTS') and VisualCrossingConfig.ELEMENTS:
-            params["elements"] = VisualCrossingConfig.ELEMENTS
+        for year in range(start_year, current_year + 1):
 
-        headers = {
-            "User-Agent": "SakuraBloomProject/1.0 (weather research)",
-            "Accept": "application/json"
-        }
+            dest_key = f"weather/{safe_city}/{year}_weather.json"
+            if hook.check_for_key(key=dest_key, bucket_name=MinioConfig.BUCKET_WEATHER_DATA):
+                logger.info(f"Year {year} for {city_name} already exists. Skipping.")
+                continue
 
-        try:
-            logger.info(f"Requesting weather data for: {city_name}")
-            logger.info(f"Date range: {VisualCrossingConfig.START_DATE} to {VisualCrossingConfig.END_DATE}")
-            
-            response = requests.get(url, params=params, headers=headers, timeout=30)
-            response.raise_for_status()
-            data = response.json()
+            start_date = f"{year}-01-01"
+            end_date = f"{year}-12-31" if year < current_year else date.today().strftime("%Y-%m-%d")
 
-            time.sleep(VisualCrossingConfig.DELAY_BETWEEN_REQUESTS)
+            location = f"{city_name},{VisualCrossingConfig.COUNTRY}"
+            url = f"{VisualCrossingConfig.BASE_URL}/{location}/{start_date}/{end_date}"
 
-            if not data:
-                logger.warning(f"No weather data returned for '{city_name}'")
-                return
+            api_params = {
+                "unitGroup": VisualCrossingConfig.UNIT_GROUP,
+                "contentType": "json",
+                "include": "days",
+                "key": api_key,
+                "elements": "tempmax,tempmin,temp,precip,snow,snowdepth,windspeed"
+            }
 
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            
+            try:
+                logger.info(f"Requesting: {city_name} year {year}")
+                response = requests.get(url, params=api_params, timeout=60)
 
-            safe_city_name = "".join([c for c in city_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+                if response.status_code == 429:
+                    logger.warning("API daily limit reached! Stopping for today.")
+                    return
 
-            dest_key = MinioConfig.WEATHER_DATA_PATH.format(
-                city=safe_city_name,
-                timestamp=timestamp
-            )
+                response.raise_for_status()
+                data = response.json()
 
+                hook.load_string(
+                    string_data=json.dumps(data, ensure_ascii=False, indent=2),
+                    key=dest_key,
+                    bucket_name=MinioConfig.BUCKET_WEATHER_DATA,
+                    replace=True
+                )
 
-            json_byte_string = json.dumps(data, ensure_ascii=False, indent=2)
+                logger.info(f"Successfully saved {year} for {city_name}")
 
+                time.sleep(1)
 
-            hook.load_string(
-                string_data=json_byte_string,
-                key=dest_key,
-                bucket_name=MinioConfig.BUCKET_WEATHER_DATA,
-                replace=True
-            )
-            
-            logger.info(f"SUCCESS: Saved weather data to {MinioConfig.BUCKET_WEATHER_DATA}/{dest_key}")
-            logger.info(f"Retrieved {len(data.get('days', []))} days of weather data for {city_name}")
+            except Exception as e:
+                logger.error(f"Error for {city_name} in {year}: {e}")
+                raise e
 
-        except requests.exceptions.HTTPError as e:
-            logger.error(f"HTTP error for {city_name}: {e}")
-            logger.error(f"Response: {e.response.text if hasattr(e, 'response') else 'No response'}")
+    cities = get_cities_list()
+    fetch_city_history.expand(city_name=cities)
 
-            
-        except requests.exceptions.Timeout:
-            logger.error(f"Request timeout for {city_name}")
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Request error for {city_name}: {e}")
-
-        except Exception as e:
-            logger.error(f"Unexpected error processing {city_name}: {e}")
-
-    cities_list = get_cities_list()
-    fetch_and_upload_weather.expand(city_name=cities_list)
-
-
-load_weather_data()
+load_weather_data_dag = load_weather_data()
